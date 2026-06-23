@@ -164,6 +164,50 @@ func getAPI(
 
 }
 
+func deleteAPI(
+	ctx context.Context,
+	req *mcp.CallToolRequest,
+
+) (*mcp.CallToolResult, error) {
+
+	var args map[string]any
+
+	json.Unmarshal(
+		req.Params.Arguments,
+		&args,
+	)
+
+	id, _ :=
+		args["id"].(string)
+
+	client := &WSO2Client{
+		BaseURL:  WSO2_URL,
+		Username: "admin",
+		Password: "admin",
+	}
+
+	result, err :=
+		client.request(
+			"DELETE",
+			"/rest-apis/"+id,
+			"",
+			"",
+		)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Text: result,
+			},
+		},
+	}, nil
+
+}
+
 func main() {
 
 	server :=
@@ -213,6 +257,33 @@ func main() {
 		},
 
 		getAPI,
+	)
+
+	server.AddTool(
+
+		&mcp.Tool{
+			Name:        "delete_api",
+			Description: "Delete API by ID",
+
+			InputSchema: map[string]any{
+
+				"type": "object",
+
+				"properties": map[string]any{
+
+					"id": map[string]any{
+						"type":        "string",
+						"description": "API ID to delete",
+					},
+				},
+
+				"required": []string{
+					"id",
+				},
+			},
+		},
+
+		deleteAPI,
 	)
 
 	if err :=
