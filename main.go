@@ -87,6 +87,83 @@ type Operation struct {
 // -------------------------
 // MCP TOOLS
 // -------------------------
+func listResources(
+	ctx context.Context,
+	req *mcp.CallToolRequest,
+
+) (*mcp.CallToolResult, error) {
+
+	client := &WSO2Client{
+		BaseURL:  WSO2_URL,
+		Username: "admin",
+		Password: "admin",
+	}
+
+	endpoints := map[string]string{
+
+		"rest_apis": "/rest-apis",
+
+		"webbroker_apis": "/webbroker-apis",
+
+		"mcp_proxies": "/mcp-proxies",
+
+		"llm_providers": "/llm-providers",
+
+		"llm_proxies": "/llm-proxies",
+	}
+
+	resources := make(
+		map[string]string,
+	)
+
+	// Loops through the endpoints and makes a GET request to each one, storing the result in the resources map
+	for name, path := range endpoints { // name is the key (e.g., "rest_apis") and path is the value (e.g., "/rest-apis")
+
+		result, err := // sends a GET request to the WSO2 API Gateway for the given path and returns the result or an error
+			client.request( //request is the func described on the top
+				"GET",
+				path,
+				"",
+				"",
+			)
+
+			// if there is an error, store the error message in the resources map and continue to the next endpoint
+		if err != nil {
+
+			resources[name] =
+				"ERROR: " + err.Error()
+
+			continue
+		}
+
+		// if the request is successful, store the result in the resources map
+		resources[name] =
+			result
+	}
+
+	// Converts the resources map into a JSON string with indentation for better readability
+	jsonData, err :=
+		json.MarshalIndent(
+			resources,
+			"",
+			"  ",
+		)
+
+	if err != nil {
+		return nil, err
+	}
+
+	// These return the result of the MCP tool execution back to the MCP Client
+	return &mcp.CallToolResult{
+
+		Content: []mcp.Content{
+
+			&mcp.TextContent{
+				Text: string(jsonData), // this is the JSON string representation of the resources map being sent back to the MCP client
+			},
+		},
+	}, nil
+}
 
 func listAPIs(
 	ctx context.Context,
@@ -218,6 +295,25 @@ func main() {
 			},
 			nil,
 		)
+
+	server.AddTool(
+
+		&mcp.Tool{
+
+			Name: "list_resources",
+
+			Description: "List all WSO2 Gateway resources",
+
+			InputSchema: map[string]any{
+
+				"type": "object",
+
+				"properties": map[string]any{},
+			},
+		},
+
+		listResources,
+	)
 
 	server.AddTool(
 		&mcp.Tool{
