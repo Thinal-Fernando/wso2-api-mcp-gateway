@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -82,6 +83,56 @@ func (c *WSO2Client) request(
 type Operation struct {
 	Method string `json:"method"` // ex/- GET
 	Path   string `json:"path"`   // ex/- /books
+}
+
+// this function builds the YAML definition for a REST API (Infrastructure as code)
+func buildAPIYaml(
+	name string,
+	version string,
+	context string,
+	upstream string,
+	operations []Operation,
+
+) string {
+
+	yaml := fmt.Sprintf(`
+apiVersion: gateway.api-platform.wso2.com/v1alpha1
+kind: RestApi
+
+metadata:
+  name: %s
+
+spec:
+  displayName: %s
+  version: %s
+  context: %s
+
+  upstream:
+    main:
+      url: "%s"
+
+  operations:
+`,
+		name,
+		name,
+		version,
+		context,
+		upstream,
+	)
+
+	// This loop iterates over the provided operations and appends them to the YAML definition in the correct format
+	for _, op := range operations {
+
+		yaml += fmt.Sprintf(`
+    - method: %s
+      path: %s
+`,
+			op.Method,
+			op.Path,
+		)
+	}
+
+	return strings.TrimSpace(yaml)
 }
 
 // -------------------------
@@ -241,6 +292,133 @@ func getAPI(
 
 }
 
+func createAPI(
+	ctx context.Context,
+	req *mcp.CallToolRequest,
+
+) (*mcp.CallToolResult, error) {
+
+	var args map[string]any
+
+	err := json.Unmarshal(
+		req.Params.Arguments,
+		&args,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	name, ok :=
+		args["name"].(string)
+
+	if !ok {
+		return nil, fmt.Errorf("missing name")
+	}
+
+	version, ok :=
+		args["version"].(string)
+
+	if !ok {
+		return nil, fmt.Errorf("missing version")
+	}
+
+	contextPath, ok :=
+		args["context"].(string)
+
+	if !ok {
+		return nil, fmt.Errorf("missing context")
+	}
+
+	upstream, ok :=
+		args["upstream"].(string)
+
+	if !ok {
+		return nil, fmt.Errorf("missing upstream")
+	}
+
+	rawOps, ok :=
+		args["operations"].([]any)
+
+	if !ok {
+		return nil, fmt.Errorf(
+			"operations required",
+		)
+	}
+
+	operations :=
+		[]Operation{}
+
+	for _, item := range rawOps {
+
+		obj, ok :=
+			item.(map[string]any)
+
+		if !ok {
+			continue
+		}
+
+		method, ok :=
+			obj["method"].(string)
+
+		if !ok {
+			continue
+		}
+
+		path, ok :=
+			obj["path"].(string)
+
+		if !ok {
+			continue
+		}
+
+		operations = append(
+			operations,
+			Operation{
+				Method: method,
+				Path:   path,
+			},
+		)
+	}
+
+	yaml :=
+		buildAPIYaml(
+			name,
+			version,
+			contextPath,
+			upstream,
+			operations,
+		)
+
+	client := &WSO2Client{
+		BaseURL:  WSO2_URL,
+		Username: "admin",
+		Password: "admin",
+	}
+
+	result, err :=
+		client.request(
+			"POST",
+			"/rest-apis",
+			yaml,
+			"application/yaml",
+		)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &mcp.CallToolResult{
+
+		Content: []mcp.Content{
+
+			&mcp.TextContent{
+				Text: result,
+			},
+		},
+	}, nil
+}
+
 func deleteAPI(
 	ctx context.Context,
 	req *mcp.CallToolRequest,
@@ -326,6 +504,79 @@ func main() {
 			},
 		},
 		listAPIs,
+	)
+
+	server.AddTool(
+
+		&mcp.Tool{
+			Name:        "create_api",
+			Description: "Create API in WSO2 Gateway",
+
+			InputSchema: map[string]any{
+
+				"type": "object",
+
+				"properties": map[string]any{
+
+					"name": map[string]any{
+						"type":        "string",
+						"description": "API name",
+					},
+
+					"version": map[string]any{
+						"type":        "string",
+						"description": "API version",
+					},
+
+					"context": map[string]any{
+						"type":        "string",
+						"description": "API context path e.g /pets",
+					},
+
+					"upstream": map[string]any{
+						"type":        "string",
+						"description": "Backend URL",
+					},
+
+					"operations": map[string]any{
+
+						"type": "array",
+
+						"description": "API operations",
+
+						"items": map[string]any{
+
+							"type": "object",
+
+							"properties": map[string]any{
+
+								"method": map[string]any{
+									"type": "string",
+								},
+
+								"path": map[string]any{
+									"type": "string",
+								},
+							},
+
+							"required": []string{
+								"method",
+								"path",
+							},
+						},
+					},
+				},
+				"required": []string{
+					"name",
+					"version",
+					"context",
+					"upstream",
+					"operations",
+				},
+			},
+		},
+
+		createAPI,
 	)
 
 	server.AddTool(
