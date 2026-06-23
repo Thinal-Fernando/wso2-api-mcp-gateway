@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -119,6 +120,50 @@ func listAPIs(
 	}, nil
 }
 
+func getAPI(
+	ctx context.Context,
+	req *mcp.CallToolRequest,
+
+) (*mcp.CallToolResult, error) {
+
+	var args map[string]any
+
+	json.Unmarshal(
+		req.Params.Arguments,
+		&args,
+	)
+
+	id, _ :=
+		args["id"].(string)
+
+	client := &WSO2Client{
+		BaseURL:  WSO2_URL,
+		Username: "admin",
+		Password: "admin",
+	}
+
+	result, err :=
+		client.request(
+			"GET",
+			"/rest-apis/"+id,
+			"",
+			"",
+		)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Text: result,
+			},
+		},
+	}, nil
+
+}
+
 func main() {
 
 	server :=
@@ -141,6 +186,33 @@ func main() {
 			},
 		},
 		listAPIs,
+	)
+
+	server.AddTool(
+
+		&mcp.Tool{
+			Name:        "get_api",
+			Description: "Get API by ID",
+
+			InputSchema: map[string]any{
+
+				"type": "object",
+
+				"properties": map[string]any{
+
+					"id": map[string]any{
+						"type":        "string",
+						"description": "API ID",
+					},
+				},
+
+				"required": []string{
+					"id",
+				},
+			},
+		},
+
+		getAPI,
 	)
 
 	if err :=
