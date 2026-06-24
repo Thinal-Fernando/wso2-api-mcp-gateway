@@ -15,11 +15,33 @@ import (
 // this is the API gateway base URL/Endpoint
 const WSO2_URL = "http://localhost:9090/api/management/v0.9"
 
+// this is for the policy hub
+const POLICY_HUB_URL = "https://db720294-98fd-40f4-85a1-cc6a3b65bc9a-prod.e1-us-east-azure.choreoapis.dev/api-platform/policy-hub-api/policy-hub-public/v1.0/policies"
+
 // this struct represents a WSO2 connection (every call to the gateway)
 type WSO2Client struct {
 	BaseURL  string
 	Username string
 	Password string
+}
+
+type policyListResponse struct {
+	Data []Policy `json:"data"`
+}
+
+type Policy struct {
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Description string `json:"description"`
+}
+
+type PolicyDocsResponse struct {
+	Data struct {
+		Policy      string `json:"policy"`
+		Version     string `json:"version"`
+		Entry       string `json:"entry"`
+		StoragePath string `json:"storagePath"`
+	}
 }
 
 // this is a helper function to make HTTP requests to the WSO2 API Gateway
@@ -135,9 +157,180 @@ spec:
 	return strings.TrimSpace(yaml)
 }
 
+func httpGet(url string) (string, error) {
+
+	req, err := http.NewRequest("GET", url, nil)
+
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+
+	if err != nil {
+		return "", err
+	}
+
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+
+	if err != nil {
+		return "", nil
+	}
+
+	if resp.StatusCode >= 400 {
+		return "",
+			fmt.Errorf(
+				"HTTP %d: %s",
+				resp.StatusCode,
+				string(data),
+			)
+	}
+
+	return string(data), nil
+}
+
+func httpGetJSON(url string, target any) error {
+
+	body, err := httpGet(url)
+
+	if err != nil {
+		return err
+	}
+
+	return json.Unmarshal(
+		[]byte(body),
+		target,
+	)
+}
+
 // -------------------------
 // MCP TOOLS
 // -------------------------
+
+func listPolicies(
+	ctx context.Context, req *mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+
+	result, err := httpGet(POLICY_HUB_URL)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Text: result,
+			},
+		},
+	}, nil
+}
+
+func getPolicy(
+	ctx context.Context,
+	req *mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+
+	var args map[string]any
+
+	if err := json.Unmarshal(
+		req.Params.Arguments,
+		&args,
+	); err != nil {
+		return nil, err
+	}
+
+	name, ok :=
+		args["policy"].(string)
+
+	if !ok {
+		return nil,
+			fmt.Errorf("missing policy")
+	}
+
+	url :=
+		fmt.Sprintf(
+			"%s/%s/versions/1.0/docs",
+			POLICY_HUB_URL,
+			name,
+		)
+
+	result, err :=
+		httpGet(url)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Text: result,
+			},
+		},
+	}, nil
+}
+
+func getPolicyMarkdown(
+	ctx context.Context,
+	req *mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+
+	var args map[string]any
+
+	if err := json.Unmarshal(
+		req.Params.Arguments,
+		&args,
+	); err != nil {
+		return nil, err
+	}
+
+	name, ok :=
+		args["policy"].(string)
+
+	if !ok {
+		return nil,
+			fmt.Errorf("missing policy")
+	}
+
+	var docs PolicyDocsResponse
+
+	err := httpGetJSON(
+		fmt.Sprintf(
+			"%s/%s/versions/1.0/docs",
+			POLICY_HUB_URL,
+			name,
+		),
+		&docs,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	mdURL :=
+		docs.Data.StoragePath +
+			"/" +
+			docs.Data.Entry
+
+	markdown, err :=
+		httpGet(mdURL)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Text: markdown,
+			},
+		},
+	}, nil
+}
+
 func listResources(
 	ctx context.Context,
 	req *mcp.CallToolRequest,
@@ -246,50 +439,6 @@ func listAPIs(
 			},
 		},
 	}, nil
-}
-
-func getAPI(
-	ctx context.Context,
-	req *mcp.CallToolRequest,
-
-) (*mcp.CallToolResult, error) {
-
-	var args map[string]any
-
-	json.Unmarshal(
-		req.Params.Arguments,
-		&args,
-	)
-
-	id, _ :=
-		args["id"].(string)
-
-	client := &WSO2Client{
-		BaseURL:  WSO2_URL,
-		Username: "admin",
-		Password: "admin",
-	}
-
-	result, err :=
-		client.request(
-			"GET",
-			"/rest-apis/"+id,
-			"",
-			"",
-		)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{
-			&mcp.TextContent{
-				Text: result,
-			},
-		},
-	}, nil
-
 }
 
 func createAPI(
@@ -419,6 +568,50 @@ func createAPI(
 	}, nil
 }
 
+func getAPI(
+	ctx context.Context,
+	req *mcp.CallToolRequest,
+
+) (*mcp.CallToolResult, error) {
+
+	var args map[string]any
+
+	json.Unmarshal(
+		req.Params.Arguments,
+		&args,
+	)
+
+	id, _ :=
+		args["id"].(string)
+
+	client := &WSO2Client{
+		BaseURL:  WSO2_URL,
+		Username: "admin",
+		Password: "admin",
+	}
+
+	result, err :=
+		client.request(
+			"GET",
+			"/rest-apis/"+id,
+			"",
+			"",
+		)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Text: result,
+			},
+		},
+	}, nil
+
+}
+
 func deleteAPI(
 	ctx context.Context,
 	req *mcp.CallToolRequest,
@@ -473,6 +666,65 @@ func main() {
 			},
 			nil,
 		)
+
+	server.AddTool(
+		&mcp.Tool{
+			Name:        "list_policies",
+			Description: "Lit all available WSO2 Policy Hub policies",
+
+			InputSchema: map[string]any{
+				"type": "object",
+
+				"properties": map[string]any{},
+			},
+		}, listPolicies,
+	)
+
+	server.AddTool(
+		&mcp.Tool{
+			Name: "get_policy",
+
+			Description: "Get policy metadata",
+
+			InputSchema: map[string]any{
+				"type": "object",
+
+				"properties": map[string]any{
+					"policy": map[string]any{
+						"type": "string",
+					},
+				},
+
+				"required": []string{
+					"policy",
+				},
+			},
+		},
+		getPolicy,
+	)
+
+	server.AddTool(
+		&mcp.Tool{
+			Name: "get_policy_markdown",
+
+			Description: "Download policy documentation",
+
+			InputSchema: map[string]any{
+				"type": "object",
+
+				"properties": map[string]any{
+					"policy": map[string]any{
+						"type": "string",
+					},
+				},
+
+				"required": []string{
+					"policy",
+				},
+			},
+		},
+		getPolicyMarkdown,
+	)
 
 	server.AddTool(
 
