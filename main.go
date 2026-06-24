@@ -16,7 +16,9 @@ import (
 const WSO2_URL = "http://localhost:9090/api/management/v0.9"
 
 // this is for the policy hub
-const POLICY_HUB_URL = "https://db720294-98fd-40f4-85a1-cc6a3b65bc9a-prod.e1-us-east-azure.choreoapis.dev/api-platform/policy-hub-api/policy-hub-public/v1.0/policies"
+const POLICY_HUB_URL = "https://db720294-98fd-40f4-85a1-cc6a3b65bc9a-prod.e1-us-east-azure.choreoapis.dev/api-platform/policy-hub-api/policy-hub-public/v1.0/policies?limit=100"
+
+const POLICY_HUB_BASE = "https://db720294-98fd-40f4-85a1-cc6a3b65bc9a-prod.e1-us-east-azure.choreoapis.dev/api-platform/policy-hub-api/policy-hub-public/v1.0/policies"
 
 // this struct represents a WSO2 connection (every call to the gateway)
 type WSO2Client struct {
@@ -42,6 +44,11 @@ type PolicyDocsResponse struct {
 		Entry       string `json:"entry"`
 		StoragePath string `json:"storagePath"`
 	}
+}
+
+type PolicySchema struct {
+	Name       string            `json:"name"`
+	Parameters map[string]string `json:"parameters"`
 }
 
 // this is a helper function to make HTTP requests to the WSO2 API Gateway
@@ -107,6 +114,37 @@ type Operation struct {
 	Path   string `json:"path"`   // ex/- /books
 }
 
+// helper function to convert Go values -> Yaml-like format
+func toYAML(v any, indent int) string {
+	space := strings.Repeat(" ", indent)
+
+	switch val := v.(type) {
+
+	case string:
+		return fmt.Sprintf("\"%s\"", val)
+
+	case float64, int, bool:
+		return fmt.Sprintf("%v", val)
+
+	case map[string]any:
+		var out strings.Builder
+		for k, vv := range val {
+			out.WriteString(fmt.Sprintf("\n%s%s: %s", space, k, toYAML(vv, indent+2)))
+		}
+		return out.String()
+
+	case []any:
+		var out strings.Builder
+		for _, item := range val {
+			out.WriteString(fmt.Sprintf("\n%s- %s", space, toYAML(item, indent+2)))
+		}
+		return out.String()
+
+	default:
+		return fmt.Sprintf("\"%v\"", val)
+	}
+}
+
 // this function builds the YAML definition for a REST API (Infrastructure as code)
 func buildAPIYaml(
 	name string,
@@ -114,6 +152,8 @@ func buildAPIYaml(
 	context string,
 	upstream string,
 	operations []Operation,
+	policy string,
+	policyConfig map[string]any,
 
 ) string {
 
@@ -152,6 +192,21 @@ spec:
 			op.Method,
 			op.Path,
 		)
+	}
+	if policy != "" {
+		yaml += `
+  policies:
+`
+		yaml += fmt.Sprintf(`    - name: %s
+`, policy)
+
+		if len(policyConfig) > 0 {
+			yaml += `      params: 
+`
+			for k, v := range policyConfig {
+				yaml += fmt.Sprintf("        %s: %s\n", k, toYAML(v, 10))
+			}
+		}
 	}
 
 	return strings.TrimSpace(yaml)
@@ -209,6 +264,90 @@ func httpGetJSON(url string, target any) error {
 // MCP TOOLS
 // -------------------------
 
+func GETPolicySchema(
+	ctx context.Context, req *mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+
+	var args map[string]any
+	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		return nil, err
+	}
+
+	name, ok := args["policy"].(string)
+	if !ok {
+		return nil, fmt.Errorf("missing policy")
+	}
+
+	var docs PolicyDocsResponse
+	err := httpGetJSON(
+		fmt.Sprintf("%s/%s/versions/1.0/docs", POLICY_HUB_BASE, name),
+		&docs,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	raw, err := httpGet(docs.Data.StoragePath + "/" + docs.Data.Entry)
+	if err != nil {
+		return nil, err
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Text: raw,
+			},
+		},
+	}, nil
+
+}
+
+func attachPolicyToAPI(
+	ctx context.Context,
+	req *mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+
+	var args map[string]any
+	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		return nil, err
+	}
+
+	apiID, _ := args["apiId"].(string)
+	policy, _ := args["policy"].(string)
+
+	config, _ := args["config"].(map[string]any)
+
+	client := &WSO2Client{
+		BaseURL:  WSO2_URL,
+		Username: "admin",
+		Password: "admin",
+	}
+
+	payload := map[string]any{
+		"policy": policy,
+		"config": config,
+	}
+
+	body, _ := json.Marshal(payload)
+
+	result, err := client.request(
+		"POST",
+		fmt.Sprintf("/rest-apis/%s/policies", apiID),
+		string(body),
+		"application/json",
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{Text: result},
+		},
+	}, nil
+}
+
 func listPolicies(
 	ctx context.Context, req *mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
@@ -253,7 +392,7 @@ func getPolicy(
 	url :=
 		fmt.Sprintf(
 			"%s/%s/versions/1.0/docs",
-			POLICY_HUB_URL,
+			POLICY_HUB_BASE,
 			name,
 		)
 
@@ -300,7 +439,7 @@ func getPolicyMarkdown(
 	err := httpGetJSON(
 		fmt.Sprintf(
 			"%s/%s/versions/1.0/docs",
-			POLICY_HUB_URL,
+			POLICY_HUB_BASE,
 			name,
 		),
 		&docs,
@@ -458,6 +597,9 @@ func createAPI(
 		return nil, err
 	}
 
+	policy, _ := args["policy"].(string)
+	policyConfig, _ := args["policyConfig"].(map[string]any)
+
 	name, ok :=
 		args["name"].(string)
 
@@ -537,6 +679,8 @@ func createAPI(
 			contextPath,
 			upstream,
 			operations,
+			policy,
+			policyConfig,
 		)
 
 	client := &WSO2Client{
@@ -727,6 +871,23 @@ func main() {
 	)
 
 	server.AddTool(
+		&mcp.Tool{
+			Name:        "get_policy_schema",
+			Description: "Get raw policy schema/documentation for parameter extraction",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"policy": map[string]any{
+						"type": "string",
+					},
+				},
+				"required": []string{"policy"},
+			},
+		},
+		GETPolicySchema,
+	)
+
+	server.AddTool(
 
 		&mcp.Tool{
 
@@ -816,6 +977,14 @@ func main() {
 								"path",
 							},
 						},
+					},
+					"policy": map[string]any{
+						"type":        "string",
+						"description": "Optional policy to attach",
+					},
+					"policyConfig": map[string]any{
+						"type":        "object",
+						"description": "Policy configuration values",
 					},
 				},
 				"required": []string{
