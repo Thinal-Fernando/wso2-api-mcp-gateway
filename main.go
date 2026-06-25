@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -16,9 +15,7 @@ import (
 const WSO2_URL = "http://localhost:9090/api/management/v0.9"
 
 // this is for the policy hub
-const POLICY_HUB_URL = "https://db720294-98fd-40f4-85a1-cc6a3b65bc9a-prod.e1-us-east-azure.choreoapis.dev/api-platform/policy-hub-api/policy-hub-public/v1.0/policies?limit=100"
-
-const POLICY_HUB_BASE = "https://db720294-98fd-40f4-85a1-cc6a3b65bc9a-prod.e1-us-east-azure.choreoapis.dev/api-platform/policy-hub-api/policy-hub-public/v1.0/policies"
+const POLICY_HUB_URL = "https://db720294-98fd-40f4-85a1-cc6a3b65bc9a-prod.e1-us-east-azure.choreoapis.dev/api-platform/policy-hub-api/policy-hub-public/v1.0/policies"
 
 // this struct represents a WSO2 connection (every call to the gateway)
 type WSO2Client struct {
@@ -44,11 +41,6 @@ type PolicyDocsResponse struct {
 		Entry       string `json:"entry"`
 		StoragePath string `json:"storagePath"`
 	}
-}
-
-type PolicySchema struct {
-	Name       string            `json:"name"`
-	Parameters map[string]string `json:"parameters"`
 }
 
 // this is a helper function to make HTTP requests to the WSO2 API Gateway
@@ -108,110 +100,6 @@ func (c *WSO2Client) request(
 	return string(data), nil
 }
 
-// this represents an API endpoint
-type Operation struct {
-	Method string `json:"method"` // ex/- GET
-	Path   string `json:"path"`   // ex/- /books
-}
-
-// helper function to convert Go values -> Yaml-like format
-func toYAML(v any, indent int) string {
-	space := strings.Repeat(" ", indent)
-
-	switch val := v.(type) {
-
-	case string:
-		return fmt.Sprintf("\"%s\"", val)
-
-	case float64, int, bool:
-		return fmt.Sprintf("%v", val)
-
-	case map[string]any:
-		var out strings.Builder
-		for k, vv := range val {
-			out.WriteString(fmt.Sprintf("\n%s%s: %s", space, k, toYAML(vv, indent+2)))
-		}
-		return out.String()
-
-	case []any:
-		var out strings.Builder
-		for _, item := range val {
-			out.WriteString(fmt.Sprintf("\n%s- %s", space, toYAML(item, indent+2)))
-		}
-		return out.String()
-
-	default:
-		return fmt.Sprintf("\"%v\"", val)
-	}
-}
-
-// this function builds the YAML definition for a REST API (Infrastructure as code)
-func buildAPIYaml(
-	name string,
-	version string,
-	context string,
-	upstream string,
-	operations []Operation,
-	policy string,
-	policyConfig map[string]any,
-
-) string {
-
-	yaml := fmt.Sprintf(`
-apiVersion: gateway.api-platform.wso2.com/v1alpha1
-kind: RestApi
-
-metadata:
-  name: %s
-
-spec:
-  displayName: %s
-  version: %s
-  context: %s
-
-  upstream:
-    main:
-      url: "%s"
-
-  operations:
-`,
-		name,
-		name,
-		version,
-		context,
-		upstream,
-	)
-
-	// This loop iterates over the provided operations and appends them to the YAML definition in the correct format
-	for _, op := range operations {
-
-		yaml += fmt.Sprintf(`
-    - method: %s
-      path: %s
-`,
-			op.Method,
-			op.Path,
-		)
-	}
-	if policy != "" {
-		yaml += `
-  policies:
-`
-		yaml += fmt.Sprintf(`    - name: %s
-`, policy)
-
-		if len(policyConfig) > 0 {
-			yaml += `      params: 
-`
-			for k, v := range policyConfig {
-				yaml += fmt.Sprintf("        %s: %s\n", k, toYAML(v, 10))
-			}
-		}
-	}
-
-	return strings.TrimSpace(yaml)
-}
-
 func httpGet(url string) (string, error) {
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -264,90 +152,6 @@ func httpGetJSON(url string, target any) error {
 // MCP TOOLS
 // -------------------------
 
-func GETPolicySchema(
-	ctx context.Context, req *mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-
-	var args map[string]any
-	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
-		return nil, err
-	}
-
-	name, ok := args["policy"].(string)
-	if !ok {
-		return nil, fmt.Errorf("missing policy")
-	}
-
-	var docs PolicyDocsResponse
-	err := httpGetJSON(
-		fmt.Sprintf("%s/%s/versions/1.0/docs", POLICY_HUB_BASE, name),
-		&docs,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	raw, err := httpGet(docs.Data.StoragePath + "/" + docs.Data.Entry)
-	if err != nil {
-		return nil, err
-	}
-
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{
-			&mcp.TextContent{
-				Text: raw,
-			},
-		},
-	}, nil
-
-}
-
-func attachPolicyToAPI(
-	ctx context.Context,
-	req *mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-
-	var args map[string]any
-	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
-		return nil, err
-	}
-
-	apiID, _ := args["apiId"].(string)
-	policy, _ := args["policy"].(string)
-
-	config, _ := args["config"].(map[string]any)
-
-	client := &WSO2Client{
-		BaseURL:  WSO2_URL,
-		Username: "admin",
-		Password: "admin",
-	}
-
-	payload := map[string]any{
-		"policy": policy,
-		"config": config,
-	}
-
-	body, _ := json.Marshal(payload)
-
-	result, err := client.request(
-		"POST",
-		fmt.Sprintf("/rest-apis/%s/policies", apiID),
-		string(body),
-		"application/json",
-	)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{
-			&mcp.TextContent{Text: result},
-		},
-	}, nil
-}
-
 func listPolicies(
 	ctx context.Context, req *mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
@@ -392,7 +196,7 @@ func getPolicy(
 	url :=
 		fmt.Sprintf(
 			"%s/%s/versions/1.0/docs",
-			POLICY_HUB_BASE,
+			POLICY_HUB_URL,
 			name,
 		)
 
@@ -439,7 +243,7 @@ func getPolicyMarkdown(
 	err := httpGetJSON(
 		fmt.Sprintf(
 			"%s/%s/versions/1.0/docs",
-			POLICY_HUB_BASE,
+			POLICY_HUB_URL,
 			name,
 		),
 		&docs,
@@ -581,107 +385,22 @@ func listAPIs(
 }
 
 func createAPI(
-	ctx context.Context,
-	req *mcp.CallToolRequest,
-
+	ctx context.Context, req *mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 
 	var args map[string]any
 
-	err := json.Unmarshal(
-		req.Params.Arguments,
-		&args,
-	)
-
-	if err != nil {
+	if err := json.Unmarshal(
+		req.Params.Arguments, &args,
+	); err != nil {
 		return nil, err
 	}
 
-	policy, _ := args["policy"].(string)
-	policyConfig, _ := args["policyConfig"].(map[string]any)
+	yamlContent, ok := args["yaml"].(string)
 
-	name, ok :=
-		args["name"].(string)
-
-	if !ok {
-		return nil, fmt.Errorf("missing name")
+	if !ok || yamlContent == "" {
+		return nil, fmt.Errorf("yaml is required")
 	}
-
-	version, ok :=
-		args["version"].(string)
-
-	if !ok {
-		return nil, fmt.Errorf("missing version")
-	}
-
-	contextPath, ok :=
-		args["context"].(string)
-
-	if !ok {
-		return nil, fmt.Errorf("missing context")
-	}
-
-	upstream, ok :=
-		args["upstream"].(string)
-
-	if !ok {
-		return nil, fmt.Errorf("missing upstream")
-	}
-
-	rawOps, ok :=
-		args["operations"].([]any)
-
-	if !ok {
-		return nil, fmt.Errorf(
-			"operations required",
-		)
-	}
-
-	operations :=
-		[]Operation{}
-
-	for _, item := range rawOps {
-
-		obj, ok :=
-			item.(map[string]any)
-
-		if !ok {
-			continue
-		}
-
-		method, ok :=
-			obj["method"].(string)
-
-		if !ok {
-			continue
-		}
-
-		path, ok :=
-			obj["path"].(string)
-
-		if !ok {
-			continue
-		}
-
-		operations = append(
-			operations,
-			Operation{
-				Method: method,
-				Path:   path,
-			},
-		)
-	}
-
-	yaml :=
-		buildAPIYaml(
-			name,
-			version,
-			contextPath,
-			upstream,
-			operations,
-			policy,
-			policyConfig,
-		)
 
 	client := &WSO2Client{
 		BaseURL:  WSO2_URL,
@@ -689,22 +408,19 @@ func createAPI(
 		Password: "admin",
 	}
 
-	result, err :=
-		client.request(
-			"POST",
-			"/rest-apis",
-			yaml,
-			"application/yaml",
-		)
+	result, err := client.request(
+		"POST",
+		"/rest-apis",
+		yamlContent,
+		"application/yaml",
+	)
 
 	if err != nil {
 		return nil, err
 	}
 
 	return &mcp.CallToolResult{
-
 		Content: []mcp.Content{
-
 			&mcp.TextContent{
 				Text: result,
 			},
@@ -756,6 +472,58 @@ func getAPI(
 
 }
 
+func updateAPI(
+	ctx context.Context,
+	req *mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+
+	var args map[string]any
+
+	if err := json.Unmarshal(
+		req.Params.Arguments,
+		&args,
+	); err != nil {
+		return nil, err
+	}
+
+	id, ok := args["id"].(string)
+
+	if !ok || id == "" {
+		return nil, fmt.Errorf("id is required")
+	}
+
+	yamlContent, ok := args["yaml"].(string)
+
+	if !ok || yamlContent == "" {
+		return nil, fmt.Errorf("yaml is required")
+	}
+
+	client := &WSO2Client{
+		BaseURL:  WSO2_URL,
+		Username: "admin",
+		Password: "admin",
+	}
+
+	result, err := client.request(
+		"PUT",
+		"/rest-apis/"+id,
+		yamlContent,
+		"application/yaml",
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Text: result,
+			},
+		},
+	}, nil
+}
+
 func deleteAPI(
 	ctx context.Context,
 	req *mcp.CallToolRequest,
@@ -798,6 +566,91 @@ func deleteAPI(
 		},
 	}, nil
 
+}
+
+func getPolicyRequirements(
+	ctx context.Context,
+	req *mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+
+	var args map[string]any
+
+	if err := json.Unmarshal(
+		req.Params.Arguments,
+		&args,
+	); err != nil {
+		return nil, err
+	}
+
+	name, ok :=
+		args["policy"].(string)
+
+	if !ok || name == "" {
+		return nil,
+			fmt.Errorf("missing policy")
+	}
+
+	var docs PolicyDocsResponse
+
+	err := httpGetJSON(
+		fmt.Sprintf(
+			"%s/%s/versions/1.0/docs",
+			POLICY_HUB_URL,
+			name,
+		),
+		&docs,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	mdURL :=
+		docs.Data.StoragePath +
+			"/" +
+			docs.Data.Entry
+
+	markdown, err :=
+		httpGet(mdURL)
+
+	if err != nil {
+		return nil, err
+	}
+
+	result := map[string]any{
+		"policy": name,
+		"instructions": `
+Read the documentation and identify:
+
+1. Required parameters
+2. Optional parameters
+3. Parameter types
+4. Example values
+
+If required parameters are missing,
+ask the user before applying the policy.
+`,
+		"documentation": markdown,
+	}
+
+	jsonData, err :=
+		json.MarshalIndent(
+			result,
+			"",
+			"  ",
+		)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Text: string(jsonData),
+			},
+		},
+	}, nil
 }
 
 func main() {
@@ -849,9 +702,62 @@ func main() {
 
 	server.AddTool(
 		&mcp.Tool{
+			Name: "get_policy_requirements",
+
+			Description: `
+				Retrieve policy documentation and determine
+				what configuration values are required.
+
+				Use this tool before applying a policy.
+
+				The returned documentation should be inspected
+				to identify required parameters, optional
+				parameters, parameter types, and example values.
+
+				If required values are missing, ask the user
+				for them before calling create_api or update_api.
+				`,
+
+			InputSchema: map[string]any{
+				"type": "object",
+
+				"properties": map[string]any{
+					"policy": map[string]any{
+						"type":        "string",
+						"description": "Policy name",
+					},
+				},
+
+				"required": []string{
+					"policy",
+				},
+			},
+		},
+		getPolicyRequirements,
+	)
+
+	server.AddTool(
+		&mcp.Tool{
 			Name: "get_policy_markdown",
 
-			Description: "Download policy documentation",
+			Description: `
+				Retrieve the full markdown documentation for a policy.
+
+				Use this tool before applying a policy.
+
+				The markdown may contain:
+
+				- required parameters
+				- optional parameters
+				- configuration examples
+				- policy YAML snippets
+
+				When a user requests a policy, inspect this documentation
+				to determine what configuration values are required.
+
+				If required values are missing, ask the user for them before
+				calling create_api or update_api.
+				`,
 
 			InputSchema: map[string]any{
 				"type": "object",
@@ -868,23 +774,6 @@ func main() {
 			},
 		},
 		getPolicyMarkdown,
-	)
-
-	server.AddTool(
-		&mcp.Tool{
-			Name:        "get_policy_schema",
-			Description: "Get raw policy schema/documentation for parameter extraction",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"policy": map[string]any{
-						"type": "string",
-					},
-				},
-				"required": []string{"policy"},
-			},
-		},
-		GETPolicySchema,
 	)
 
 	server.AddTool(
@@ -922,77 +811,62 @@ func main() {
 	server.AddTool(
 
 		&mcp.Tool{
-			Name:        "create_api",
-			Description: "Create API in WSO2 Gateway",
+			Name: "create_api",
+			Description: `
+				Create a REST API in WSO2 API Gateway.
+
+				The yaml field must contain a complete RestApi YAML manifest.
+
+				Typical structure:
+
+				apiVersion: gateway.api-platform.wso2.com/v1alpha1
+				kind: RestApi
+
+				metadata:
+					name: api-name
+
+				spec:
+					displayName: API Name
+			    	version: 1.0.0
+					context: /api
+
+				upstream:
+					main:
+					  url: https://backend.example.com
+
+				operations:
+					- method: GET
+					  path: /items
+
+				Generate all required fields.
+
+				The YAML may contain:
+
+					- operations
+					- authentication
+					- policies
+					- rate limits
+					- observability
+
+				When a policy is requested:
+					1. Use get_policy_requirements.
+					2. Determine required configuration values.
+					3. Ask the user for missing values.
+					4. Generate the final YAML.
+				`,
 
 			InputSchema: map[string]any{
-
 				"type": "object",
 
 				"properties": map[string]any{
-
-					"name": map[string]any{
+					"yaml": map[string]any{
 						"type":        "string",
-						"description": "API name",
-					},
-
-					"version": map[string]any{
-						"type":        "string",
-						"description": "API version",
-					},
-
-					"context": map[string]any{
-						"type":        "string",
-						"description": "API context path e.g /pets",
-					},
-
-					"upstream": map[string]any{
-						"type":        "string",
-						"description": "Backend URL",
-					},
-
-					"operations": map[string]any{
-
-						"type": "array",
-
-						"description": "API operations",
-
-						"items": map[string]any{
-
-							"type": "object",
-
-							"properties": map[string]any{
-
-								"method": map[string]any{
-									"type": "string",
-								},
-
-								"path": map[string]any{
-									"type": "string",
-								},
-							},
-
-							"required": []string{
-								"method",
-								"path",
-							},
-						},
-					},
-					"policy": map[string]any{
-						"type":        "string",
-						"description": "Optional policy to attach",
-					},
-					"policyConfig": map[string]any{
-						"type":        "object",
-						"description": "Policy configuration values",
+						"description": "Complete WSO2 RestApi YAML manifest",
 					},
 				},
+
 				"required": []string{
-					"name",
-					"version",
-					"context",
-					"upstream",
-					"operations",
+					"yaml",
 				},
 			},
 		},
@@ -1025,6 +899,41 @@ func main() {
 		},
 
 		getAPI,
+	)
+
+	server.AddTool(
+		&mcp.Tool{
+			Name: "update_api",
+			Description: `
+				Update an existing REST API.
+
+				The yaml field must contain the complete updated RestApi manifest.
+
+				Before updating:
+
+				1. Use get_api to inspect the current API.
+				2.  Use get_policy_requirements if a policy is being added.
+				3. Determine required policy parameters.
+				4. Ask the user for any missing values.
+				5. Generate the updated YAML.
+				`,
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id": map[string]any{
+						"type": "string",
+					},
+					"yaml": map[string]any{
+						"type": "string",
+					},
+				},
+				"required": []string{
+					"id",
+					"yaml",
+				},
+			},
+		},
+		updateAPI,
 	)
 
 	server.AddTool(
