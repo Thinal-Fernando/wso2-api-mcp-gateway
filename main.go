@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -16,6 +18,11 @@ const WSO2_URL = "http://localhost:9090/api/management/v0.9"
 
 // this is for the policy hub
 const POLICY_HUB_URL = "https://db720294-98fd-40f4-85a1-cc6a3b65bc9a-prod.e1-us-east-azure.choreoapis.dev/api-platform/policy-hub-api/policy-hub-public/v1.0/policies"
+
+// this is to get the schemas from github
+const OPENAPI_SCHEMA_URL = "https://raw.githubusercontent.com/wso2/api-platform/main/gateway/gateway-controller/api/management-openapi.yaml"
+
+var managementSpec map[string]any
 
 // this struct represents a WSO2 connection (every call to the gateway)
 type WSO2Client struct {
@@ -148,9 +155,146 @@ func httpGetJSON(url string, target any) error {
 	)
 }
 
+func loadSchemas() error {
+
+	body, err := httpGet(
+		OPENAPI_SCHEMA_URL,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	return yaml.Unmarshal(
+		[]byte(body),
+		&managementSpec,
+	)
+}
+
+func getSchemaByName(
+	name string,
+) (any, error) {
+
+	components, ok :=
+		managementSpec["components"].(map[string]any)
+
+	if !ok {
+		return nil,
+			fmt.Errorf(
+				"components not found",
+			)
+	}
+
+	schemas, ok :=
+		components["schemas"].(map[string]any)
+
+	if !ok {
+		return nil,
+			fmt.Errorf(
+				"schemas not found",
+			)
+	}
+
+	schema, ok :=
+		schemas[name]
+
+	if !ok {
+		return nil,
+			fmt.Errorf(
+				"schema %s not found",
+				name,
+			)
+	}
+
+	return schema, nil
+}
+
 // -------------------------
 // MCP TOOLS
 // -------------------------
+
+func listSchemas(
+	ctx context.Context,
+	req *mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+
+	components :=
+		managementSpec["components"].(map[string]any)
+
+	schemas :=
+		components["schemas"].(map[string]any)
+
+	names := []string{}
+
+	for name := range schemas {
+		names = append(
+			names,
+			name,
+		)
+	}
+
+	data, _ :=
+		json.MarshalIndent(
+			names,
+			"",
+			"  ",
+		)
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Text: string(data),
+			},
+		},
+	}, nil
+}
+
+func getSchema(
+	ctx context.Context,
+	req *mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+
+	var args map[string]any
+
+	if err := json.Unmarshal(
+		req.Params.Arguments,
+		&args,
+	); err != nil {
+		return nil, err
+	}
+
+	name, ok :=
+		args["name"].(string)
+
+	if !ok || name == "" {
+		return nil,
+			fmt.Errorf(
+				"schema name required",
+			)
+	}
+
+	schema, err :=
+		getSchemaByName(name)
+
+	if err != nil {
+		return nil, err
+	}
+
+	data, _ :=
+		json.MarshalIndent(
+			schema,
+			"",
+			"  ",
+		)
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Text: string(data),
+			},
+		},
+	}, nil
+}
 
 func listPolicies(
 	ctx context.Context, req *mcp.CallToolRequest,
@@ -655,6 +799,10 @@ ask the user before applying the policy.
 
 func main() {
 
+	if err := loadSchemas(); err != nil {
+		panic(err)
+	}
+
 	server :=
 		mcp.NewServer(
 			&mcp.Implementation{
@@ -663,6 +811,48 @@ func main() {
 			},
 			nil,
 		)
+
+	server.AddTool(
+		&mcp.Tool{
+			Name: "list_schemas",
+
+			Description: `
+				List schema definitions available in
+				management-openapi.yaml.
+				`,
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
+		listSchemas,
+	)
+
+	server.AddTool(
+		&mcp.Tool{
+			Name: "get_schema",
+
+			Description: `
+				Retrieve a schema definition from
+				management-openapi.yaml.
+
+				Use this tool before generating API
+				or policy manifests.
+				`,
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": map[string]any{
+						"type": "string",
+					},
+				},
+				"required": []string{
+					"name",
+				},
+			},
+		},
+		getSchema,
+	)
 
 	server.AddTool(
 		&mcp.Tool{
@@ -813,46 +1003,15 @@ func main() {
 		&mcp.Tool{
 			Name: "create_api",
 			Description: `
-				Create a REST API in WSO2 API Gateway.
+				Create a REST API in WSO2 Gateway.
 
-				The yaml field must contain a complete RestApi YAML manifest.
+				Before generating YAML:
 
-				Typical structure:
+				1. Use get_schema("RestAPIRequest")
+				2. Follow the schema requirements
+				3. Generate a valid RestApi manifest
 
-				apiVersion: gateway.api-platform.wso2.com/v1alpha1
-				kind: RestApi
-
-				metadata:
-					name: api-name
-
-				spec:
-					displayName: API Name
-			    	version: 1.0.0
-					context: /api
-
-				upstream:
-					main:
-					  url: https://backend.example.com
-
-				operations:
-					- method: GET
-					  path: /items
-
-				Generate all required fields.
-
-				The YAML may contain:
-
-					- operations
-					- authentication
-					- policies
-					- rate limits
-					- observability
-
-				When a policy is requested:
-					1. Use get_policy_requirements.
-					2. Determine required configuration values.
-					3. Ask the user for missing values.
-					4. Generate the final YAML.
+				Policies may also be included.
 				`,
 
 			InputSchema: map[string]any{
@@ -905,18 +1064,16 @@ func main() {
 		&mcp.Tool{
 			Name: "update_api",
 			Description: `
-				Update an existing REST API.
+					Update an existing REST API.
 
-				The yaml field must contain the complete updated RestApi manifest.
+					Workflow:
 
-				Before updating:
-
-				1. Use get_api to inspect the current API.
-				2.  Use get_policy_requirements if a policy is being added.
-				3. Determine required policy parameters.
-				4. Ask the user for any missing values.
-				5. Generate the updated YAML.
-				`,
+					1. Use get_api
+					2. Use get_schema("RestAPIRequest")
+					3. Use get_policy_requirements if policies are being added
+					4. Ask the user for missing values
+					5. Generate updated YAML
+					`,
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
